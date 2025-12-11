@@ -1,0 +1,56 @@
+# Build outputs
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Logs
+*.log
+
+# Models (too large for git)
+models/
+*.bin
+
+# Downloaded dependencies (auto-fetched by CMake)
+_deps/
+
+# Node.js (for examples/client)
+examples/node_modules/
+node_modules/
+
+# TypeScript build
+examples/dist/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Editor backups
+*~
+*.swp
+*.swo
+*.bak
+
+# Claude Code
+.claude/
