@@ -127,10 +127,7 @@ void WhisperServer::releaseContext(ContextSlot* slot) {
     }
 }
 
-std::shared_ptr<Session> WhisperServer::createSession(
-    const std::string& id,
-    std::function<void(const std::string&)> send_fn
-) {
+std::shared_ptr<Session> WhisperServer::createSession(const std::string& id) {
     // Try to acquire a context
     ContextSlot* slot = acquireContext();
     if (!slot) {
@@ -142,7 +139,6 @@ std::shared_ptr<Session> WhisperServer::createSession(
     session->id = id;
     session->audio = std::make_unique<AudioBuffer>(30.0f, WHISPER_SAMPLE_RATE);
     session->context_slot = slot;
-    session->send_message = std::move(send_fn);
     session->active = true;
 
     {
@@ -152,6 +148,22 @@ std::shared_ptr<Session> WhisperServer::createSession(
 
     std::cout << "[whisper-server] Created session " << id << " on context " << slot->slot_id << std::endl;
     return session;
+}
+
+std::deque<std::string> WhisperServer::drainSessionMessages(const std::string& session_id) {
+    std::shared_ptr<Session> session;
+
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        auto it = sessions_.find(session_id);
+        if (it == sessions_.end()) {
+            return {}; // Session doesn't exist
+        }
+        session = it->second;
+    }
+
+    // Drain messages from the session's queue
+    return session->drainMessages();
 }
 
 void WhisperServer::destroySession(const std::string& id) {
@@ -318,11 +330,12 @@ void WhisperServer::runInference(std::shared_ptr<Session> session) {
         text.clear();
     }
 
-    // Send result if text changed
+    // Enqueue result if text changed
+    // Messages are sent from the uWS event loop thread via drainSessionMessages()
     if (!text.empty() && text != session->last_text) {
         // Determine if this is a partial or final result
         // For now, send as partial (final detection would require silence detection)
-        session->send_message(makePartialMessage(text));
+        session->enqueueMessage(makePartialMessage(text));
         session->last_text = text;
     }
 }

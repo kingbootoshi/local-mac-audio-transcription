@@ -6,6 +6,7 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -50,8 +51,23 @@ struct Session {
     std::atomic<bool> active{true};
     std::atomic<bool> inference_running{false};
 
-    // Callback to send message to client
-    std::function<void(const std::string&)> send_message;
+    // Thread-safe outgoing message queue
+    // Inference thread enqueues messages; uWS event loop thread drains them
+    std::mutex outgoing_mutex;
+    std::deque<std::string> outgoing_messages;
+
+    void enqueueMessage(const std::string& msg) {
+        std::lock_guard<std::mutex> lock(outgoing_mutex);
+        outgoing_messages.push_back(msg);
+    }
+
+    // Returns all pending messages and clears the queue
+    std::deque<std::string> drainMessages() {
+        std::lock_guard<std::mutex> lock(outgoing_mutex);
+        std::deque<std::string> messages;
+        messages.swap(outgoing_messages);
+        return messages;
+    }
 };
 
 // Main server class
@@ -75,11 +91,11 @@ public:
     // === Public methods for WebSocket handlers ===
 
     // Session management
-    std::shared_ptr<Session> createSession(
-        const std::string& id,
-        std::function<void(const std::string&)> send_fn
-    );
+    std::shared_ptr<Session> createSession(const std::string& id);
     void destroySession(const std::string& id);
+
+    // Get pending messages for a session (called from uWS event loop thread)
+    std::deque<std::string> drainSessionMessages(const std::string& session_id);
 
     // Audio processing
     void onAudioReceived(const std::string& session_id, const int16_t* data, size_t len);

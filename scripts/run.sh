@@ -5,8 +5,8 @@ SERVER_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$SERVER_DIR/build"
 BINARY="$BUILD_DIR/whisper-stream-server"
 
-# Default model path
-DEFAULT_MODEL="$SERVER_DIR/../../whisper.cpp/models/ggml-base.en.bin"
+# Default model path (whisper.cpp is a sibling directory to whisper-server)
+DEFAULT_MODEL="$SERVER_DIR/../whisper.cpp/models/ggml-base.en.bin"
 
 if [ ! -f "$BINARY" ]; then
     echo "Error: Server binary not found at $BINARY"

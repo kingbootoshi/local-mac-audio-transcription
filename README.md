@@ -62,7 +62,7 @@ Or with custom options:
 ### Test with Browser Client
 
 ```bash
-cd examples
+cd examples/web-client
 npm install
 npm run dev
 ```
@@ -86,7 +86,7 @@ local-mac-audio-transcription/
 │   └── run.sh                 # Run script
 │
 ├── examples/                   # Example clients
-│   └── (browser client)       # TypeScript WebSocket client
+│   └── web-client/            # TypeScript browser client
 │
 ├── install/                    # Mac deployment
 │   ├── install.sh             # Install as launchd service

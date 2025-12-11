@@ -7,11 +7,25 @@
 #include <csignal>
 #include <cstring>
 
-// Global server pointer for signal handling
+// Global pointers for signal handling
 static WhisperServer* g_server = nullptr;
+static us_listen_socket_t* g_listen_socket = nullptr;
+static uWS::Loop* g_loop = nullptr;
 
 void signalHandler(int signum) {
     std::cout << "\n[whisper-server] Received signal " << signum << ", shutting down..." << std::endl;
+
+    // Close the listen socket to stop accepting new connections
+    // and cause the event loop to exit
+    if (g_loop && g_listen_socket) {
+        g_loop->defer([]{
+            if (g_listen_socket) {
+                us_listen_socket_close(0, g_listen_socket);
+                g_listen_socket = nullptr;
+            }
+        });
+    }
+
     if (g_server) {
         g_server->stop();
     }
@@ -130,7 +144,7 @@ int main(int argc, char** argv) {
                 );
             },
 
-            .open = [&server, &config](auto* ws) {
+            .open = [&server](auto* ws) {
                 // Generate session ID
                 static int session_counter = 0;
                 std::string session_id = "session_" + std::to_string(++session_counter);
@@ -140,24 +154,8 @@ int main(int argc, char** argv) {
 
                 std::cout << "[whisper-server] WebSocket connected: " << session_id << std::endl;
 
-                // Create session with send callback
-                // Note: we capture ws but need to be careful about lifetime
-                auto send_fn = [ws](const std::string& msg) {
-                    ws->send(msg, uWS::OpCode::TEXT);
-                };
-
-                // Access server's createSession through a helper
-                // Since WhisperServer::createSession is private, we need to expose it
-                // For now, we'll do this inline
-
-                // Actually, let's make a simpler approach: store the WebSocket pointer
-                // and have the server use it directly. But uWS doesn't support that well.
-
-                // Better approach: use a message queue per session that the WS reads from
-                // For MVP, we'll use a direct send which is safe if we're careful
-
-                // Create the session
-                auto session = server.createSession(session_id, send_fn);
+                // Create the session (no send callback - we use message queue now)
+                auto session = server.createSession(session_id);
 
                 if (!session) {
                     ws->send(R"({"type":"error","message":"No available contexts, try again later"})",
@@ -166,7 +164,7 @@ int main(int argc, char** argv) {
                     return;
                 }
 
-                // Send ready message
+                // Send ready message (safe: we're on the uWS event loop thread)
                 ws->send(server.makeReadyMessage(), uWS::OpCode::TEXT);
             },
 
@@ -185,6 +183,13 @@ int main(int argc, char** argv) {
                     // For now, we don't handle any text commands
                     std::cout << "[whisper-server] Received text message: " << message << std::endl;
                 }
+
+                // Drain any pending messages from the inference thread
+                // This is safe because we're on the uWS event loop thread
+                auto pending = server.drainSessionMessages(data->session_id);
+                for (const auto& msg : pending) {
+                    ws->send(msg, uWS::OpCode::TEXT);
+                }
             },
 
             .close = [&server](auto* ws, int code, std::string_view message) {
@@ -197,6 +202,8 @@ int main(int argc, char** argv) {
         })
         .listen(config.port, [&config](auto* listen_socket) {
             if (listen_socket) {
+                g_listen_socket = listen_socket;
+                g_loop = uWS::Loop::get();
                 std::cout << "[whisper-server] Listening on port " << config.port << std::endl;
             } else {
                 std::cerr << "[whisper-server] Failed to listen on port " << config.port << std::endl;
