@@ -96,3 +96,65 @@ endif()
 
 # Install
 install(TARGETS whisper-stream-server DESTINATION bin)
+
+# ============================================
+# Testing
+# ============================================
+option(BUILD_TESTS "Build tests" OFF)
+
+if(BUILD_TESTS)
+    # Fetch Catch2
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.5.0
+    )
+    FetchContent_MakeAvailable(Catch2)
+
+    enable_testing()
+
+    # Unit tests - AudioBuffer
+    add_executable(test_audio_buffer tests/unit/test_audio_buffer.cpp src/audio_buffer.cpp)
+    target_link_libraries(test_audio_buffer PRIVATE Catch2::Catch2WithMain)
+    target_include_directories(test_audio_buffer PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME AudioBuffer COMMAND test_audio_buffer)
+
+    # Unit tests - VAD State Machine
+    add_executable(test_vad_state_machine tests/unit/test_vad_state_machine.cpp)
+    target_link_libraries(test_vad_state_machine PRIVATE Catch2::Catch2WithMain)
+    target_include_directories(test_vad_state_machine PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME VADStateMachine COMMAND test_vad_state_machine)
+
+    # Integration tests - requires whisper model
+    add_executable(test_transcription
+        tests/integration/test_transcription.cpp
+        src/audio_buffer.cpp
+        src/whisper_server.cpp
+    )
+    target_link_libraries(test_transcription PRIVATE
+        Catch2::Catch2WithMain
+        whisper
+        uSockets
+        ZLIB::ZLIB
+    )
+    target_include_directories(test_transcription PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${uwebsockets_SOURCE_DIR}/src
+        ${usockets_SOURCE_DIR}/src
+        ${WHISPER_CPP_DIR}/include
+        ${WHISPER_CPP_DIR}/ggml/include
+    )
+    if(APPLE)
+        target_link_libraries(test_transcription PRIVATE
+            "-framework Foundation"
+            "-framework Accelerate"
+        )
+        if(WHISPER_METAL)
+            target_link_libraries(test_transcription PRIVATE
+                "-framework Metal"
+                "-framework MetalKit"
+            )
+        endif()
+    endif()
+    add_test(NAME Transcription COMMAND test_transcription)
+endif()

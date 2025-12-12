@@ -1,0 +1,17 @@
+{
+  "name": "whisper-server-e2e-tests",
+  "version": "1.0.0",
+  "description": "End-to-end tests for whisper-stream-server",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.0.0",
+    "ws": "^8.18.0"
+  }
+}
