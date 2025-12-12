@@ -9,6 +9,9 @@
 
 using json = nlohmann::json;
 
+// Callback to disable whisper internal logging (for VAD spam)
+static void whisper_log_disable(enum ggml_log_level, const char*, void*) {}
+
 // Generate a random session ID
 static std::string generateSessionId() {
     static std::random_device rd;
@@ -37,6 +40,12 @@ WhisperServer::~WhisperServer() {
             whisper_free(slot->ctx);
             slot->ctx = nullptr;
         }
+    }
+
+    // Free VAD context
+    if (vad_ctx_) {
+        whisper_vad_free(vad_ctx_);
+        vad_ctx_ = nullptr;
     }
 }
 
@@ -73,6 +82,26 @@ bool WhisperServer::init() {
     }
 
     std::cout << "[whisper-server] All contexts loaded successfully" << std::endl;
+
+    // Load VAD model (optional)
+    if (!config_.vad_model_path.empty()) {
+        std::cout << "[whisper-server] Loading VAD model: " << config_.vad_model_path << std::endl;
+
+        whisper_vad_context_params vad_params = whisper_vad_default_context_params();
+        vad_params.n_threads = 2;
+        vad_params.use_gpu = false;  // VAD is lightweight, CPU is fine
+
+        vad_ctx_ = whisper_vad_init_from_file_with_params(
+            config_.vad_model_path.c_str(), vad_params);
+
+        if (!vad_ctx_) {
+            std::cerr << "[whisper-server] Failed to load VAD model" << std::endl;
+            return false;
+        }
+        std::cout << "[whisper-server] VAD enabled (threshold=" << config_.vad_threshold
+                  << ", silence=" << config_.silence_trigger_ms << "ms)" << std::endl;
+    }
+
     return true;
 }
 
@@ -208,40 +237,68 @@ void WhisperServer::onAudioReceived(const std::string& session_id, const int16_t
 }
 
 void WhisperServer::inferenceLoop() {
-    const int step_samples = (config_.step_ms * WHISPER_SAMPLE_RATE) / 1000;
-    const int length_samples = (config_.length_ms * WHISPER_SAMPLE_RATE) / 1000;
-    const int keep_samples = (config_.keep_ms * WHISPER_SAMPLE_RATE) / 1000;
+    using namespace std::chrono;
+
+    const int vad_interval_ms = config_.vad_check_ms;      // 30ms
+    const int whisper_interval_ms = config_.step_ms;       // 500ms
+
+    auto last_vad_time = steady_clock::now();
+    auto last_whisper_time = steady_clock::now();
 
     while (running_) {
-        auto start_time = std::chrono::steady_clock::now();
+        auto now = steady_clock::now();
+        int64_t now_ms = duration_cast<milliseconds>(now.time_since_epoch()).count();
 
         // Get snapshot of active sessions
-        std::vector<std::shared_ptr<Session>> active_sessions;
+        std::vector<std::shared_ptr<Session>> sessions;
         {
             std::lock_guard<std::mutex> lock(sessions_mutex_);
             for (auto& [id, session] : sessions_) {
-                if (session->active && !session->inference_running) {
-                    // Check if we have enough audio
-                    if (session->audio->hasMinDuration(config_.step_ms)) {
-                        active_sessions.push_back(session);
-                    }
+                if (session->active) {
+                    sessions.push_back(session);
                 }
             }
         }
 
-        // Run inference on each session (in their respective context)
-        for (auto& session : active_sessions) {
-            session->inference_running = true;
-            runInference(session);
-            session->inference_running = false;
+        // === VAD CHECK (every 30ms) ===
+        auto vad_elapsed = duration_cast<milliseconds>(now - last_vad_time).count();
+        if (vad_ctx_ && vad_elapsed >= vad_interval_ms) {
+            for (auto& session : sessions) {
+                updateVADState(session, now_ms);
+            }
+            last_vad_time = now;
         }
 
-        // Sleep to maintain step interval
-        auto elapsed = std::chrono::steady_clock::now() - start_time;
-        auto sleep_time = std::chrono::milliseconds(config_.step_ms) - elapsed;
-        if (sleep_time > std::chrono::milliseconds(0)) {
-            std::this_thread::sleep_for(sleep_time);
+        // === WHISPER INFERENCE (every 500ms) ===
+        auto whisper_elapsed = duration_cast<milliseconds>(now - last_whisper_time).count();
+        if (whisper_elapsed >= whisper_interval_ms) {
+            for (auto& session : sessions) {
+                // If VAD disabled, always run inference (original behavior)
+                if (!vad_ctx_) {
+                    if (!session->inference_running && session->audio->hasMinDuration(config_.step_ms)) {
+                        session->inference_running = true;
+                        runInference(session);
+                        session->inference_running = false;
+                    }
+                }
+                // If VAD enabled, only run when SPEAKING
+                else if (session->speech_state == SpeechState::SPEAKING) {
+                    if (!session->inference_running) {
+                        session->inference_running = true;
+                        runInference(session);
+                        session->inference_running = false;
+                    }
+                }
+                // Handle ENDING state - emit final
+                else if (session->speech_state == SpeechState::ENDING) {
+                    emitFinal(session);
+                }
+            }
+            last_whisper_time = now;
         }
+
+        // Sleep briefly to avoid busy-wait
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
@@ -333,12 +390,148 @@ void WhisperServer::runInference(std::shared_ptr<Session> session) {
     // Enqueue result if text changed
     // Messages are sent from the uWS event loop thread via drainSessionMessages()
     if (!text.empty() && text != session->last_text) {
-        // Determine if this is a partial or final result
-        // For now, send as partial (final detection would require silence detection)
         session->enqueueMessage(makePartialMessage(text));
+        session->pending_text = text;  // Save for potential final
         session->last_text = text;
     }
 }
+
+// === VAD Methods ===
+
+float WhisperServer::detectSpeechProb(const float* samples, int n_samples) {
+    if (!vad_ctx_ || n_samples == 0) return 0.0f;
+
+    std::lock_guard<std::mutex> lock(vad_mutex_);
+
+    // Disable whisper internal logging during VAD (too verbose)
+    whisper_log_set(whisper_log_disable, nullptr);
+
+    bool success = whisper_vad_detect_speech(vad_ctx_, samples, n_samples);
+
+    // Re-enable logging
+    whisper_log_set(nullptr, nullptr);
+
+    if (!success) return 0.0f;
+
+    int n_probs = whisper_vad_n_probs(vad_ctx_);
+    if (n_probs == 0) return 0.0f;
+
+    const float* probs = whisper_vad_probs(vad_ctx_);
+    return probs[n_probs - 1];
+}
+
+void WhisperServer::updateVADState(std::shared_ptr<Session> session, int64_t now_ms) {
+    // Get last 30ms of audio for VAD
+    std::vector<float> recent_audio = session->audio->getLastMs(config_.vad_check_ms);
+    if (recent_audio.empty()) return;
+
+    float speech_prob = detectSpeechProb(recent_audio.data(), recent_audio.size());
+    bool is_speech = speech_prob > config_.vad_threshold;
+
+    switch (session->speech_state) {
+        case SpeechState::IDLE:
+            if (is_speech) {
+                session->speech_state = SpeechState::SPEAKING;
+                session->speech_start_ms = now_ms;
+                session->last_speech_ms = now_ms;
+                session->pending_text.clear();
+                std::cout << "[VAD:" << session->id << "] === SPEECH STARTED ===" << std::endl;
+            }
+            break;
+
+        case SpeechState::SPEAKING:
+            if (is_speech) {
+                session->last_speech_ms = now_ms;
+            } else {
+                int silence_ms = now_ms - session->last_speech_ms;
+                if (silence_ms >= config_.silence_trigger_ms) {
+                    int speech_duration = now_ms - session->speech_start_ms;
+                    float audio_duration_ms = (session->pcmf32_old.size() * 1000.0f) / WHISPER_SAMPLE_RATE;
+
+                    if (speech_duration >= config_.min_speech_ms) {
+                        session->speech_state = SpeechState::ENDING;
+                        std::cout << "[VAD:" << session->id << "] === SPEECH ENDED ===" << std::endl;
+                        std::cout << "[VAD:" << session->id << "]   Speech duration: " << speech_duration << "ms" << std::endl;
+                        std::cout << "[VAD:" << session->id << "]   Audio buffer: " << audio_duration_ms << "ms" << std::endl;
+                        std::cout << "[VAD:" << session->id << "]   Last partial: \"" << session->pending_text << "\"" << std::endl;
+                    } else {
+                        // Too short, ignore
+                        session->speech_state = SpeechState::IDLE;
+                        std::cout << "[VAD:" << session->id << "] Ignored short utterance (" << speech_duration << "ms)" << std::endl;
+                    }
+                }
+            }
+            break;
+
+        case SpeechState::ENDING:
+            // Check if user started speaking again before final was emitted
+            if (is_speech) {
+                session->speech_state = SpeechState::SPEAKING;
+                session->last_speech_ms = now_ms;
+                std::cout << "[VAD:" << session->id << "] Speech resumed (user interrupted)" << std::endl;
+            }
+            break;
+    }
+}
+
+void WhisperServer::emitFinal(std::shared_ptr<Session> session) {
+    if (session->speech_state != SpeechState::ENDING) return;
+
+    std::string final_text;
+
+    // Use accumulated audio from pcmf32_old (runInference clears audio buffer)
+    std::vector<float> pcmf32 = session->pcmf32_old;
+    float duration_ms = (pcmf32.size() * 1000.0f) / WHISPER_SAMPLE_RATE;
+
+    std::cout << "[VAD:" << session->id << "] Running final inference..." << std::endl;
+    std::cout << "[VAD:" << session->id << "]   Audio samples: " << pcmf32.size()
+              << " (" << duration_ms << "ms)" << std::endl;
+
+    if (!pcmf32.empty() && session->context_slot && session->context_slot->ctx) {
+        whisper_context* ctx = session->context_slot->ctx;
+        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        wparams.print_progress = false;
+        wparams.print_special = false;
+        wparams.print_realtime = false;
+        wparams.print_timestamps = false;
+        wparams.translate = config_.translate;
+        wparams.single_segment = false;
+        wparams.language = config_.language.c_str();
+        wparams.n_threads = config_.n_threads;
+
+        if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) == 0) {
+            for (int i = 0; i < whisper_full_n_segments(ctx); ++i) {
+                const char* seg = whisper_full_get_segment_text(ctx, i);
+                if (seg) final_text += seg;
+            }
+            // Trim
+            size_t start = final_text.find_first_not_of(" \t\n\r");
+            size_t end = final_text.find_last_not_of(" \t\n\r");
+            if (start != std::string::npos && end != std::string::npos) {
+                final_text = final_text.substr(start, end - start + 1);
+            } else {
+                final_text.clear();
+            }
+        }
+    }
+
+    if (!final_text.empty()) {
+        session->enqueueMessage(makeFinalMessage(final_text));
+        std::cout << "[VAD:" << session->id << "] === FINAL TRANSCRIPT ===" << std::endl;
+        std::cout << "[VAD:" << session->id << "]   \"" << final_text << "\"" << std::endl;
+    } else {
+        std::cout << "[VAD:" << session->id << "] Final inference returned empty/blank" << std::endl;
+    }
+
+    // Reset state
+    session->speech_state = SpeechState::IDLE;
+    session->pending_text.clear();
+    session->pcmf32_old.clear();
+    session->last_text.clear();
+    session->audio->clear();
+}
+
+// === JSON Message Helpers ===
 
 std::string WhisperServer::makeReadyMessage() {
     json msg;

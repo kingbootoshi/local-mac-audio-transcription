@@ -28,11 +28,21 @@ struct ServerConfig {
     bool use_gpu = true;
     bool flash_attn = true;
     bool translate = false;
+
+    // VAD configuration
+    std::string vad_model_path = "";    // Empty = VAD disabled
+    float vad_threshold = 0.5f;
+    int vad_check_ms = 30;              // VAD cadence
+    int silence_trigger_ms = 1000;      // Silence before final
+    int min_speech_ms = 100;            // Ignore short utterances
 };
 
 // Forward declarations
 struct Session;
 class WhisperServer;
+
+// VAD speech state (managed by inference thread)
+enum class SpeechState { IDLE, SPEAKING, ENDING };
 
 // Context slot in the pool
 struct ContextSlot {
@@ -50,6 +60,12 @@ struct Session {
     ContextSlot* context_slot = nullptr;
     std::atomic<bool> active{true};
     std::atomic<bool> inference_running{false};
+
+    // VAD state (managed by inference thread)
+    SpeechState speech_state = SpeechState::IDLE;
+    int64_t speech_start_ms = 0;        // When speech began
+    int64_t last_speech_ms = 0;         // Last VAD-positive timestamp
+    std::string pending_text;           // Last partial for potential final
 
     // Thread-safe outgoing message queue
     // Inference thread enqueues messages; uWS event loop thread drains them
@@ -116,6 +132,10 @@ private:
     std::atomic<bool> running_{false};
     std::thread inference_thread_;
 
+    // VAD context (shared across sessions, mutex-protected)
+    whisper_vad_context* vad_ctx_ = nullptr;
+    std::mutex vad_mutex_;
+
     // Context pool management
     ContextSlot* acquireContext();
     void releaseContext(ContextSlot* slot);
@@ -123,6 +143,11 @@ private:
     // Inference loop
     void inferenceLoop();
     void runInference(std::shared_ptr<Session> session);
+
+    // VAD methods
+    float detectSpeechProb(const float* samples, int n_samples);
+    void updateVADState(std::shared_ptr<Session> session, int64_t now_ms);
+    void emitFinal(std::shared_ptr<Session> session);
 };
 
 #endif // WHISPER_SERVER_HPP

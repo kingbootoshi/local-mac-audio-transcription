@@ -44,6 +44,9 @@ void printUsage(const char* prog) {
               << "      --keep MS         Audio overlap in ms (default: 200)\n"
               << "      --no-gpu          Disable GPU acceleration\n"
               << "      --translate       Translate to English\n"
+              << "      --vad-model PATH  Path to VAD model (enables VAD)\n"
+              << "      --vad-threshold N Speech probability threshold 0.0-1.0 (default: 0.5)\n"
+              << "      --vad-silence MS  Silence duration to trigger final (default: 500)\n"
               << "  -h, --help            Show this help\n"
               << std::endl;
 }
@@ -85,6 +88,15 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
         }
         else if (arg == "--translate") {
             config.translate = true;
+        }
+        else if (arg == "--vad-model" && i + 1 < argc) {
+            config.vad_model_path = argv[++i];
+        }
+        else if (arg == "--vad-threshold" && i + 1 < argc) {
+            config.vad_threshold = std::stof(argv[++i]);
+        }
+        else if (arg == "--vad-silence" && i + 1 < argc) {
+            config.silence_trigger_ms = std::stoi(argv[++i]);
         }
         else {
             std::cerr << "Unknown argument: " << arg << std::endl;
