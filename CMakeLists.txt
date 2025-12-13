@@ -9,14 +9,22 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(WHISPER_METAL "Enable Metal GPU acceleration" ON)
 option(WHISPER_COREML "Enable CoreML acceleration" OFF)
 
-# Paths
-set(WHISPER_CPP_DIR "${CMAKE_SOURCE_DIR}/../whisper.cpp" CACHE PATH "Path to whisper.cpp")
+# Fetch whisper.cpp automatically
+include(FetchContent)
 
-# Build whisper.cpp as a subdirectory
-add_subdirectory(${WHISPER_CPP_DIR} ${CMAKE_BINARY_DIR}/whisper.cpp)
+FetchContent_Declare(
+    whisper
+    GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+    GIT_TAG        v1.8.2
+)
+
+# Don't build whisper examples/tests
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(whisper)
 
 # Fetch uWebSockets and its dependencies
-include(FetchContent)
 
 FetchContent_Declare(
     uSockets
@@ -67,8 +75,8 @@ target_include_directories(whisper-stream-server PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${uwebsockets_SOURCE_DIR}/src
     ${usockets_SOURCE_DIR}/src
-    ${WHISPER_CPP_DIR}/include
-    ${WHISPER_CPP_DIR}/ggml/include
+    ${whisper_SOURCE_DIR}/include
+    ${whisper_SOURCE_DIR}/ggml/include
 )
 
 # Find zlib (required by uWebSockets for compression)
@@ -141,8 +149,8 @@ if(BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src
         ${uwebsockets_SOURCE_DIR}/src
         ${usockets_SOURCE_DIR}/src
-        ${WHISPER_CPP_DIR}/include
-        ${WHISPER_CPP_DIR}/ggml/include
+        ${whisper_SOURCE_DIR}/include
+        ${whisper_SOURCE_DIR}/ggml/include
     )
     if(APPLE)
         target_link_libraries(test_transcription PRIVATE

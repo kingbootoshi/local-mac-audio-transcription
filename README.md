@@ -16,7 +16,6 @@ Real-time speech-to-text transcription server using [whisper.cpp](https://github
 ### Prerequisites
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
-- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) cloned as sibling directory
 - CMake 3.14+
 - Xcode Command Line Tools
 
@@ -25,18 +24,9 @@ Real-time speech-to-text transcription server using [whisper.cpp](https://github
 brew install cmake
 xcode-select --install
 
-# Clone whisper.cpp (required)
-cd /path/to/your/dev
-git clone https://github.com/ggerganov/whisper.cpp.git
-
 # Clone this repo
 git clone https://github.com/kingbootoshi/local-mac-audio-transcription.git
 cd local-mac-audio-transcription
-
-# Download a whisper model
-cd ../whisper.cpp
-./models/download-ggml-model.sh base.en
-cd -
 ```
 
 ### Build
@@ -44,6 +34,8 @@ cd -
 ```bash
 ./scripts/build.sh
 ```
+
+The build script uses CMake FetchContent to automatically download whisper.cpp. No manual cloning required.
 
 ### Run
 
@@ -54,7 +46,8 @@ cd -
 Or with custom options:
 ```bash
 ./build/whisper-stream-server \
-  --model ../whisper.cpp/models/ggml-base.en.bin \
+  --model models/ggml-base.en.bin \
+  --vad-model models/ggml-silero-vad.bin \
   --port 9090 \
   --contexts 2
 ```
@@ -106,15 +99,18 @@ local-mac-audio-transcription/
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--model` | `models/ggml-base.en.bin` | Path to whisper model |
+| `--model` | (required) | Path to whisper model |
+| `--vad-model` | (required) | Path to VAD model |
 | `--port` | `9090` | WebSocket server port |
+| `--host` | `0.0.0.0` | Bind address |
+| `--token` | (none) | Authentication token for WebSocket connections |
 | `--contexts` | `2` | Number of parallel transcription contexts |
 | `--threads` | `4` | CPU threads per inference |
 | `--step` | `500` | Inference interval (ms) |
 | `--length` | `5000` | Audio context window (ms) |
 | `--keep` | `200` | Overlap between windows (ms) |
-| `--vad-threshold` | `0.6` | Voice activity detection threshold |
-| `--silence-ms` | `1000` | Silence duration to trigger final (ms) |
+| `--vad-threshold` | `0.5` | Voice activity detection threshold |
+| `--vad-silence` | `1000` | Silence duration to trigger final (ms) |
 | `--language` | `en` | Language code |
 | `--no-gpu` | - | Disable Metal GPU |
 
@@ -131,14 +127,75 @@ local-mac-audio-transcription/
 { "type": "error", "message": "..." }
 ```
 
-## Mac Mini Deployment (24/7)
+## Security
 
+### Token Authentication
+
+For any deployment accessible over a network, use token authentication:
+
+**Server:**
 ```bash
-cd install
-sudo ./install.sh --port 9090 --contexts 4
+./build/whisper-stream-server --token YOUR_SECRET_TOKEN ...
 ```
 
-See `install/` for launchd service management.
+**Client:**
+```javascript
+const ws = new WebSocket('ws://host:port?token=YOUR_SECRET_TOKEN');
+```
+
+Connections without a valid token are rejected with HTTP 401.
+
+## Mac Mini Deployment (24/7)
+
+### Install as System Service
+
+```bash
+# Build first
+./scripts/build.sh
+
+# Install (downloads models automatically)
+sudo ./install/install.sh --token YOUR_SECRET
+
+# With all options
+sudo ./install/install.sh --token YOUR_SECRET --port 9090 --contexts 4
+```
+
+The install script will:
+1. Build the binary if not already built
+2. Download the whisper model (~148 MB) from Hugging Face
+3. Download the VAD model (~1 MB) from Hugging Face
+4. Install binary to `/usr/local/bin/`
+5. Install models to `/usr/local/share/whisper/`
+6. Create and start a launchd service
+
+### Service Management
+
+```bash
+# Check status
+sudo launchctl list | grep whisper
+
+# View logs
+tail -f /usr/local/var/log/whisper-stream-server.log
+
+# Stop
+sudo launchctl unload /Library/LaunchDaemons/com.whisper.stream-server.plist
+
+# Start
+sudo launchctl load /Library/LaunchDaemons/com.whisper.stream-server.plist
+
+# Verify port is listening
+lsof -nP -iTCP:9090 -sTCP:LISTEN
+```
+
+### Test Connection
+
+```bash
+# If token auth enabled
+wscat -c 'ws://localhost:9090?token=YOUR_SECRET'
+
+# If no token
+wscat -c ws://localhost:9090
+```
 
 ## Memory Usage
 

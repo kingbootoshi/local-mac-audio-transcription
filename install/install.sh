@@ -6,9 +6,12 @@
 # Usage: sudo ./install.sh [options]
 #
 # Options:
-#   --model PATH    Path to whisper model (default: downloads base.en)
-#   --port PORT     Server port (default: 9090)
-#   --contexts N    Number of parallel contexts (default: 2)
+#   --model PATH      Path to whisper model (default: downloads base.en)
+#   --vad-model PATH  Path to VAD model (default: downloads silero)
+#   --port PORT       Server port (default: 9090)
+#   --host ADDRESS    Bind address (default: 0.0.0.0)
+#   --token SECRET    Authentication token for connections
+#   --contexts N      Number of parallel contexts (default: 2)
 #
 
 set -e
@@ -21,7 +24,10 @@ NC='\033[0m' # No Color
 
 # Default values
 MODEL_PATH=""
+VAD_MODEL_PATH=""
 PORT="9090"
+HOST="0.0.0.0"
+TOKEN=""
 CONTEXTS="2"
 
 # Installation paths
@@ -37,8 +43,20 @@ while [[ $# -gt 0 ]]; do
             MODEL_PATH="$2"
             shift 2
             ;;
+        --vad-model)
+            VAD_MODEL_PATH="$2"
+            shift 2
+            ;;
         --port)
             PORT="$2"
+            shift 2
+            ;;
+        --host)
+            HOST="$2"
+            shift 2
+            ;;
+        --token)
+            TOKEN="$2"
             shift 2
             ;;
         --contexts)
@@ -61,16 +79,15 @@ fi
 echo -e "${GREEN}=== Whisper Stream Server Installer ===${NC}"
 echo ""
 
-# Find the server directory (assuming script is in install/)
+# Find the project directory (assuming script is in install/)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-SERVER_DIR="$PROJECT_DIR/server"
 
 # Check if binary exists
-BINARY_PATH="$SERVER_DIR/build/whisper-stream-server"
+BINARY_PATH="$PROJECT_DIR/build/whisper-stream-server"
 if [[ ! -f "$BINARY_PATH" ]]; then
     echo -e "${YELLOW}Binary not found. Building...${NC}"
-    cd "$SERVER_DIR"
+    cd "$PROJECT_DIR"
 
     if [[ ! -f "scripts/build.sh" ]]; then
         echo -e "${RED}Error: build.sh not found. Please build manually first.${NC}"
@@ -85,43 +102,83 @@ if [[ ! -f "$BINARY_PATH" ]]; then
     fi
 fi
 
-echo -e "${GREEN}[1/5] Creating directories...${NC}"
+echo -e "${GREEN}[1/6] Creating directories...${NC}"
 mkdir -p "$INSTALL_BIN"
 mkdir -p "$INSTALL_SHARE"
 mkdir -p "$INSTALL_LOG"
 
-echo -e "${GREEN}[2/5] Installing binary...${NC}"
+echo -e "${GREEN}[2/6] Installing binary...${NC}"
 cp "$BINARY_PATH" "$INSTALL_BIN/whisper-stream-server"
 chmod 755 "$INSTALL_BIN/whisper-stream-server"
 echo "  Installed: $INSTALL_BIN/whisper-stream-server"
 
-echo -e "${GREEN}[3/5] Installing model...${NC}"
+echo -e "${GREEN}[3/6] Installing whisper model...${NC}"
 if [[ -n "$MODEL_PATH" ]]; then
-    # User provided model
     if [[ ! -f "$MODEL_PATH" ]]; then
         echo -e "${RED}Error: Model not found at $MODEL_PATH${NC}"
         exit 1
     fi
     cp "$MODEL_PATH" "$INSTALL_SHARE/ggml-base.en.bin"
+    echo "  Copied from: $MODEL_PATH"
+elif [[ -f "$INSTALL_SHARE/ggml-base.en.bin" ]]; then
+    echo "  Using existing model at $INSTALL_SHARE/ggml-base.en.bin"
 else
-    # Check for existing model
-    WHISPER_CPP_DIR="$PROJECT_DIR/../whisper.cpp"
-    DEFAULT_MODEL="$WHISPER_CPP_DIR/models/ggml-base.en.bin"
-
-    if [[ -f "$DEFAULT_MODEL" ]]; then
-        cp "$DEFAULT_MODEL" "$INSTALL_SHARE/ggml-base.en.bin"
-        echo "  Copied from: $DEFAULT_MODEL"
-    elif [[ -f "$INSTALL_SHARE/ggml-base.en.bin" ]]; then
-        echo "  Using existing model at $INSTALL_SHARE/ggml-base.en.bin"
-    else
-        echo -e "${YELLOW}  Downloading base.en model...${NC}"
-        curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
-            -o "$INSTALL_SHARE/ggml-base.en.bin"
+    echo -e "${YELLOW}  Downloading base.en model from Hugging Face...${NC}"
+    curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+        -o "$INSTALL_SHARE/ggml-base.en.bin" \
+        --progress-bar
+    if [[ ! -f "$INSTALL_SHARE/ggml-base.en.bin" ]]; then
+        echo -e "${RED}Error: Failed to download whisper model${NC}"
+        exit 1
     fi
 fi
 echo "  Model: $INSTALL_SHARE/ggml-base.en.bin"
 
-echo -e "${GREEN}[4/5] Installing launchd plist...${NC}"
+echo -e "${GREEN}[4/6] Installing VAD model...${NC}"
+if [[ -n "$VAD_MODEL_PATH" ]]; then
+    if [[ ! -f "$VAD_MODEL_PATH" ]]; then
+        echo -e "${RED}Error: VAD model not found at $VAD_MODEL_PATH${NC}"
+        exit 1
+    fi
+    cp "$VAD_MODEL_PATH" "$INSTALL_SHARE/ggml-silero-vad.bin"
+    echo "  Copied from: $VAD_MODEL_PATH"
+elif [[ -f "$INSTALL_SHARE/ggml-silero-vad.bin" ]]; then
+    echo "  Using existing VAD model at $INSTALL_SHARE/ggml-silero-vad.bin"
+else
+    echo -e "${YELLOW}  Downloading Silero VAD model from Hugging Face...${NC}"
+    curl -L "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin" \
+        -o "$INSTALL_SHARE/ggml-silero-vad.bin" \
+        --progress-bar
+    if [[ ! -f "$INSTALL_SHARE/ggml-silero-vad.bin" ]]; then
+        echo -e "${RED}Error: Failed to download VAD model${NC}"
+        exit 1
+    fi
+fi
+echo "  VAD Model: $INSTALL_SHARE/ggml-silero-vad.bin"
+
+echo -e "${GREEN}[5/6] Installing launchd plist...${NC}"
+
+# Build ProgramArguments
+PROGRAM_ARGS="        <string>/usr/local/bin/whisper-stream-server</string>
+        <string>--model</string>
+        <string>/usr/local/share/whisper/ggml-base.en.bin</string>
+        <string>--vad-model</string>
+        <string>/usr/local/share/whisper/ggml-silero-vad.bin</string>
+        <string>--port</string>
+        <string>${PORT}</string>
+        <string>--host</string>
+        <string>${HOST}</string>
+        <string>--contexts</string>
+        <string>${CONTEXTS}</string>
+        <string>--threads</string>
+        <string>4</string>"
+
+# Add token if provided
+if [[ -n "$TOKEN" ]]; then
+    PROGRAM_ARGS="$PROGRAM_ARGS
+        <string>--token</string>
+        <string>${TOKEN}</string>"
+fi
 
 # Generate plist with custom settings
 cat > "$PLIST_PATH" << EOF
@@ -134,15 +191,7 @@ cat > "$PLIST_PATH" << EOF
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/whisper-stream-server</string>
-        <string>--model</string>
-        <string>/usr/local/share/whisper/ggml-base.en.bin</string>
-        <string>--port</string>
-        <string>${PORT}</string>
-        <string>--contexts</string>
-        <string>${CONTEXTS}</string>
-        <string>--threads</string>
-        <string>4</string>
+$PROGRAM_ARGS
     </array>
 
     <key>RunAtLoad</key>
@@ -181,7 +230,7 @@ EOF
 chmod 644 "$PLIST_PATH"
 echo "  Installed: $PLIST_PATH"
 
-echo -e "${GREEN}[5/5] Starting service...${NC}"
+echo -e "${GREEN}[6/6] Starting service...${NC}"
 
 # Unload if already loaded
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
@@ -205,18 +254,29 @@ echo ""
 echo -e "${GREEN}=== Installation Complete ===${NC}"
 echo ""
 echo "Service Details:"
-echo "  Binary:  $INSTALL_BIN/whisper-stream-server"
-echo "  Model:   $INSTALL_SHARE/ggml-base.en.bin"
-echo "  Port:    $PORT"
+echo "  Binary:   $INSTALL_BIN/whisper-stream-server"
+echo "  Model:    $INSTALL_SHARE/ggml-base.en.bin"
+echo "  VAD:      $INSTALL_SHARE/ggml-silero-vad.bin"
+echo "  Host:     $HOST"
+echo "  Port:     $PORT"
 echo "  Contexts: $CONTEXTS"
-echo "  Logs:    $INSTALL_LOG/whisper-stream-server.log"
+if [[ -n "$TOKEN" ]]; then
+    echo "  Auth:     Token required (ws://host:port?token=...)"
+else
+    echo "  Auth:     None (add --token SECRET for production)"
+fi
+echo "  Logs:     $INSTALL_LOG/whisper-stream-server.log"
 echo ""
 echo "Commands:"
-echo "  Status:  sudo launchctl list | grep whisper"
-echo "  Stop:    sudo launchctl unload $PLIST_PATH"
-echo "  Start:   sudo launchctl load $PLIST_PATH"
-echo "  Logs:    tail -f $INSTALL_LOG/whisper-stream-server.log"
+echo "  Status:   sudo launchctl list | grep whisper"
+echo "  Stop:     sudo launchctl unload $PLIST_PATH"
+echo "  Start:    sudo launchctl load $PLIST_PATH"
+echo "  Logs:     tail -f $INSTALL_LOG/whisper-stream-server.log"
 echo ""
 echo "Test with:"
-echo "  wscat -c ws://localhost:$PORT"
+if [[ -n "$TOKEN" ]]; then
+    echo "  wscat -c 'ws://localhost:$PORT?token=YOUR_TOKEN'"
+else
+    echo "  wscat -c ws://localhost:$PORT"
+fi
 echo ""

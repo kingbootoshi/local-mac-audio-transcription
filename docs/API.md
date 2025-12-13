@@ -16,10 +16,47 @@ ws://localhost:9090/transcribe
 ws://localhost:9090/api/v1/stream
 ```
 
+### Authentication
+
+If the server is started with `--token SECRET`, all WebSocket connections must include the token as a query parameter:
+
+```
+ws://host:port?token=SECRET
+```
+
+Connections without a valid token receive HTTP 401 and are rejected before the WebSocket handshake completes.
+
+**Example (JavaScript):**
+```javascript
+const ws = new WebSocket('ws://192.168.1.50:9090?token=my_secret_token');
+```
+
+**Example (wscat):**
+```bash
+wscat -c 'ws://localhost:9090?token=my_secret_token'
+```
+
+### Connection Flow
+
+1. Client connects to WebSocket endpoint (with `?token=...` if auth enabled)
+2. Server creates session (no whisper context assigned yet)
+3. Server sends `ready` message
+4. Client streams binary PCM audio
+5. When VAD detects speech start → server leases a whisper context
+6. Server sends `partial` messages during speech
+7. When VAD detects speech end → server sends `final` message, releases context
+8. Cycle repeats for next utterance
+
+**Note:** The `ready` message indicates the session is created and ready to receive audio. It does NOT mean a whisper context is allocated. Contexts are leased on-demand when speech is detected, allowing many idle connections without exhausting the context pool.
+
 ### Example Connection (JavaScript)
 
 ```javascript
+// Without authentication
 const ws = new WebSocket('ws://localhost:9090');
+
+// With authentication
+const ws = new WebSocket('ws://localhost:9090?token=YOUR_SECRET');
 
 ws.onopen = () => {
   console.log('Connected');
@@ -320,27 +357,31 @@ The server does not implement rate limiting. For production:
 
 ## Security Considerations
 
-### Current State
+### Built-in Security
 
-- **No authentication**: Any client can connect
-- **No encryption**: Plain WebSocket (ws://)
+- **Token authentication**: Use `--token SECRET` to require authentication
+- **Host binding**: Default `0.0.0.0`, can restrict with `--host 127.0.0.1`
+
+### Current Limitations
+
+- **No encryption**: Plain WebSocket (ws://) - use TLS proxy for production
 - **No input validation**: Server trusts audio format
 
 ### Production Recommendations
 
-1. **Use TLS**: Deploy behind nginx/Caddy with SSL
-   ```
-   wss://your-domain.com/transcribe
+1. **Enable token auth**: Always use `--token` in production
+   ```bash
+   ./whisper-stream-server --token YOUR_SECRET ...
    ```
 
-2. **Add authentication**: Token in URL or first message
-   ```javascript
-   const ws = new WebSocket('wss://host/transcribe?token=xxx');
+2. **Use TLS**: Deploy behind nginx/Caddy with SSL, or use Cloudflare Tunnel
+   ```
+   wss://your-domain.com/transcribe?token=xxx
    ```
 
 3. **Rate limit**: nginx `limit_conn` and `limit_req`
 
-4. **Validate origin**: Check `Origin` header in production
+4. **Validate origin**: Check `Origin` header via reverse proxy
 
 ## Protocol Versioning
 
@@ -366,8 +407,11 @@ Future versions may add:
 # Install
 npm install -g wscat
 
-# Connect
+# Connect (no auth)
 wscat -c ws://localhost:9090
+
+# Connect (with auth token)
+wscat -c 'ws://localhost:9090?token=YOUR_SECRET'
 
 # You'll receive the ready message
 < {"type":"ready","model":"models/ggml-base.en.bin","contexts":2}

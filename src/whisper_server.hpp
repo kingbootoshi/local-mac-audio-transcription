@@ -19,6 +19,7 @@
 struct ServerConfig {
     std::string model_path = "models/ggml-base.en.bin";
     std::string language = "en";
+    std::string host = "0.0.0.0";       // Bind address (all interfaces by default)
     int port = 9090;
     int n_contexts = 2;       // Number of parallel whisper contexts
     int n_threads = 4;        // Threads per inference
@@ -29,12 +30,15 @@ struct ServerConfig {
     bool flash_attn = true;
     bool translate = false;
 
-    // VAD configuration
-    std::string vad_model_path = "";    // Empty = VAD disabled
+    // VAD configuration (required)
+    std::string vad_model_path = "";    // Path to VAD model (required)
     float vad_threshold = 0.5f;
     int vad_check_ms = 30;              // VAD cadence
     int silence_trigger_ms = 1000;      // Silence before final
     int min_speech_ms = 100;            // Ignore short utterances
+
+    // Authentication
+    std::string auth_token = "";        // Empty = no auth required
 };
 
 // Forward declarations

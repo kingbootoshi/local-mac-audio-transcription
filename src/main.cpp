@@ -33,9 +33,13 @@ void signalHandler(int signum) {
 
 void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n\n"
-              << "Options:\n"
-              << "  -m, --model PATH      Path to whisper model (default: models/ggml-base.en.bin)\n"
+              << "Required:\n"
+              << "  -m, --model PATH      Path to whisper model\n"
+              << "      --vad-model PATH  Path to VAD model\n"
+              << "\nOptions:\n"
               << "  -p, --port PORT       Port to listen on (default: 9090)\n"
+              << "      --host ADDRESS    Bind address (default: 0.0.0.0)\n"
+              << "      --token SECRET    Authentication token for WebSocket connections\n"
               << "  -c, --contexts N      Number of parallel contexts (default: 2)\n"
               << "  -t, --threads N       Threads per inference (default: 4)\n"
               << "  -l, --language LANG   Language code (default: en)\n"
@@ -44,9 +48,8 @@ void printUsage(const char* prog) {
               << "      --keep MS         Audio overlap in ms (default: 200)\n"
               << "      --no-gpu          Disable GPU acceleration\n"
               << "      --translate       Translate to English\n"
-              << "      --vad-model PATH  Path to VAD model (enables VAD)\n"
               << "      --vad-threshold N Speech probability threshold 0.0-1.0 (default: 0.5)\n"
-              << "      --vad-silence MS  Silence duration to trigger final (default: 500)\n"
+              << "      --vad-silence MS  Silence duration to trigger final (default: 1000)\n"
               << "  -h, --help            Show this help\n"
               << std::endl;
 }
@@ -98,13 +101,38 @@ bool parseArgs(int argc, char** argv, ServerConfig& config) {
         else if (arg == "--vad-silence" && i + 1 < argc) {
             config.silence_trigger_ms = std::stoi(argv[++i]);
         }
+        else if (arg == "--host" && i + 1 < argc) {
+            config.host = argv[++i];
+        }
+        else if (arg == "--token" && i + 1 < argc) {
+            config.auth_token = argv[++i];
+        }
         else {
             std::cerr << "Unknown argument: " << arg << std::endl;
             printUsage(argv[0]);
             return false;
         }
     }
+
+    // Validate required arguments
+    if (config.vad_model_path.empty()) {
+        std::cerr << "Error: --vad-model is required\n" << std::endl;
+        printUsage(argv[0]);
+        return false;
+    }
+
     return true;
+}
+
+// Helper to extract query parameter from URL query string
+std::string getQueryParam(std::string_view query, const std::string& param) {
+    std::string search = param + "=";
+    size_t pos = query.find(search);
+    if (pos == std::string_view::npos) return "";
+    pos += search.length();
+    size_t end = query.find('&', pos);
+    if (end == std::string_view::npos) end = query.length();
+    return std::string(query.substr(pos, end - pos));
 }
 
 // Per-socket user data
@@ -145,8 +173,18 @@ int main(int argc, char** argv) {
             .maxBackpressure = 1 * 1024 * 1024,    // 1MB backpressure
 
             // Handlers
-            .upgrade = [](auto* res, auto* req, auto* context) {
-                // Accept all upgrades
+            .upgrade = [&config](auto* res, auto* req, auto* context) {
+                // Check auth token if configured
+                if (!config.auth_token.empty()) {
+                    std::string token = getQueryParam(req->getQuery(), "token");
+                    if (token != config.auth_token) {
+                        res->writeStatus("401 Unauthorized");
+                        res->end("Invalid or missing token");
+                        return;
+                    }
+                }
+
+                // Accept the upgrade
                 res->template upgrade<PerSocketData>(
                     { .session_id = "" },
                     req->getHeader("sec-websocket-key"),
@@ -211,14 +249,17 @@ int main(int argc, char** argv) {
                 server.destroySession(data->session_id);
             }
         })
-        .listen(config.port, [&config, &server](auto* listen_socket) {
+        .listen(config.host, config.port, [&config, &server](auto* listen_socket) {
             if (listen_socket) {
                 g_listen_socket = listen_socket;
                 g_loop = uWS::Loop::get();
                 server.setEventLoop(static_cast<void*>(g_loop));
-                std::cout << "[whisper-server] Listening on port " << config.port << std::endl;
+                std::cout << "[whisper-server] Listening on " << config.host << ":" << config.port << std::endl;
+                if (!config.auth_token.empty()) {
+                    std::cout << "[whisper-server] Token authentication enabled" << std::endl;
+                }
             } else {
-                std::cerr << "[whisper-server] Failed to listen on port " << config.port << std::endl;
+                std::cerr << "[whisper-server] Failed to listen on " << config.host << ":" << config.port << std::endl;
             }
         })
         .run();

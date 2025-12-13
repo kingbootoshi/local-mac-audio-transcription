@@ -10,6 +10,7 @@ const statusEl = document.getElementById('status') as HTMLSpanElement;
 const partialEl = document.getElementById('partial') as HTMLDivElement;
 const transcriptEl = document.getElementById('transcript') as HTMLDivElement;
 const serverUrlEl = document.getElementById('serverUrl') as HTMLInputElement;
+const authTokenEl = document.getElementById('authToken') as HTMLInputElement;
 
 // State
 let client: WhisperClient | null = null;
@@ -44,10 +45,17 @@ function appendTranscript(text: string) {
 
 // Event Handlers
 async function handleConnect() {
-  const url = serverUrlEl.value.trim();
+  let url = serverUrlEl.value.trim();
   if (!url) {
     setStatus('Please enter server URL', '#c00');
     return;
+  }
+
+  // Append auth token if provided
+  const token = authTokenEl.value.trim();
+  if (token) {
+    const separator = url.includes('?') ? '&' : '?';
+    url = `${url}${separator}token=${encodeURIComponent(token)}`;
   }
 
   setStatus('Connecting...', '#f90');
