@@ -9,27 +9,17 @@ echo "=== Whisper Stream Server Build ==="
 echo "Server dir: $SERVER_DIR"
 echo "Build dir: $BUILD_DIR"
 
-# Check for whisper.cpp
-WHISPER_DIR="$SERVER_DIR/../whisper.cpp"
-if [ ! -d "$WHISPER_DIR" ]; then
-    echo "Error: whisper.cpp not found at $WHISPER_DIR"
-    echo "Please clone whisper.cpp to /Users/saint/Dev/whisper.cpp"
-    exit 1
-fi
-
-echo "Using whisper.cpp at: $WHISPER_DIR"
-
 # Create build directory
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# Configure with CMake
+# Configure with CMake (whisper.cpp is fetched automatically via FetchContent)
 echo ""
 echo "=== Configuring with CMake ==="
+echo "Note: First build downloads whisper.cpp (~100MB), please wait..."
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DWHISPER_METAL=ON \
-    -DWHISPER_CPP_DIR="$WHISPER_DIR"
+    -DWHISPER_METAL=ON
 
 # Build
 echo ""
