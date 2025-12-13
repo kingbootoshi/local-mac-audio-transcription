@@ -164,17 +164,11 @@ void WhisperServer::releaseContext(ContextSlot* slot) {
 }
 
 std::shared_ptr<Session> WhisperServer::createSession(const std::string& id) {
-    // Try to acquire a context
-    ContextSlot* slot = acquireContext();
-    if (!slot) {
-        std::cerr << "[whisper-server] No available contexts for new session" << std::endl;
-        return nullptr;
-    }
-
+    // No longer acquire context here - will be leased when speech starts
     auto session = std::make_shared<Session>();
     session->id = id;
     session->audio = std::make_unique<AudioBuffer>(30.0f, WHISPER_SAMPLE_RATE);
-    session->context_slot = slot;
+    session->context_slot = nullptr;  // Explicitly null - no context yet
     session->active = true;
 
     {
@@ -182,7 +176,7 @@ std::shared_ptr<Session> WhisperServer::createSession(const std::string& id) {
         sessions_[id] = session;
     }
 
-    std::cout << "[whisper-server] Created session " << id << " on context " << slot->slot_id << std::endl;
+    std::cout << "[whisper-server] Created session " << id << " (no context yet)" << std::endl;
     return session;
 }
 
@@ -431,19 +425,82 @@ float WhisperServer::detectSpeechProb(const float* samples, int n_samples) {
 void WhisperServer::updateVADState(std::shared_ptr<Session> session, int64_t now_ms) {
     // Get last 30ms of audio for VAD
     std::vector<float> recent_audio = session->audio->getLastMs(config_.vad_check_ms);
-    if (recent_audio.empty()) return;
 
-    float speech_prob = detectSpeechProb(recent_audio.data(), recent_audio.size());
+    // For WAITING_FOR_CONTEXT, we need to keep trying even without new audio
+    // (user may have stopped recording while waiting)
+    if (recent_audio.empty()) {
+        if (session->speech_state == SpeechState::WAITING_FOR_CONTEXT) {
+            // Treat as silence - this will trigger catch-up inference attempt
+            // when enough silence time has passed
+        } else {
+            return;  // No audio and not waiting - nothing to do
+        }
+    }
+
+    float speech_prob = recent_audio.empty() ? 0.0f :
+        detectSpeechProb(recent_audio.data(), recent_audio.size());
     bool is_speech = speech_prob > config_.vad_threshold;
 
     switch (session->speech_state) {
         case SpeechState::IDLE:
             if (is_speech) {
-                session->speech_state = SpeechState::SPEAKING;
-                session->speech_start_ms = now_ms;
+                // Try to lease a context for this utterance
+                ContextSlot* slot = acquireContext();
+                if (slot) {
+                    session->context_slot = slot;
+                    session->speech_state = SpeechState::SPEAKING;
+                    session->speech_start_ms = now_ms;
+                    session->last_speech_ms = now_ms;
+                    session->pending_text.clear();
+                    std::cout << "[VAD:" << session->id << "] Leased context " << slot->slot_id << std::endl;
+                    std::cout << "[VAD:" << session->id << "] === SPEECH STARTED ===" << std::endl;
+                } else {
+                    // No context available - enter waiting state
+                    session->speech_state = SpeechState::WAITING_FOR_CONTEXT;
+                    session->speech_start_ms = now_ms;
+                    session->last_speech_ms = now_ms;
+                    session->waiting_start_ms = now_ms;
+                    session->pending_text.clear();
+                    std::cout << "[VAD:" << session->id << "] Speech detected, waiting for context..." << std::endl;
+                }
+            }
+            break;
+
+        case SpeechState::WAITING_FOR_CONTEXT:
+            if (is_speech) {
                 session->last_speech_ms = now_ms;
-                session->pending_text.clear();
-                std::cout << "[VAD:" << session->id << "] === SPEECH STARTED ===" << std::endl;
+                // Keep trying to acquire context
+                ContextSlot* slot = acquireContext();
+                if (slot) {
+                    session->context_slot = slot;
+                    session->speech_state = SpeechState::SPEAKING;
+                    std::cout << "[VAD:" << session->id << "] Leased context " << slot->slot_id
+                              << " (was waiting " << (now_ms - session->waiting_start_ms) << "ms)" << std::endl;
+                    std::cout << "[VAD:" << session->id << "] === SPEECH STARTED (delayed) ===" << std::endl;
+                }
+            } else {
+                // User stopped speaking while waiting for context
+                int silence_ms = now_ms - session->last_speech_ms;
+                if (silence_ms >= config_.silence_trigger_ms) {
+                    int speech_duration = now_ms - session->speech_start_ms;
+                    if (speech_duration >= config_.min_speech_ms) {
+                        // Need to do catch-up inference on buffered audio
+                        ContextSlot* slot = acquireContext();
+                        if (slot) {
+                            session->context_slot = slot;
+                            session->speech_state = SpeechState::ENDING;
+                            std::cout << "[VAD:" << session->id << "] Leased context " << slot->slot_id
+                                      << " for catch-up inference" << std::endl;
+                            std::cout << "[VAD:" << session->id << "] === SPEECH ENDED (was waiting) ===" << std::endl;
+                        }
+                        // If still no context, stay in WAITING_FOR_CONTEXT - we'll retry
+                    } else {
+                        // Too short, discard
+                        session->speech_state = SpeechState::IDLE;
+                        session->audio->clear();
+                        std::cout << "[VAD:" << session->id << "] Discarded short utterance while waiting" << std::endl;
+                    }
+                }
             }
             break;
 
@@ -463,8 +520,14 @@ void WhisperServer::updateVADState(std::shared_ptr<Session> session, int64_t now
                         std::cout << "[VAD:" << session->id << "]   Audio buffer: " << audio_duration_ms << "ms" << std::endl;
                         std::cout << "[VAD:" << session->id << "]   Last partial: \"" << session->pending_text << "\"" << std::endl;
                     } else {
-                        // Too short, ignore
+                        // Too short, ignore and release context
                         session->speech_state = SpeechState::IDLE;
+                        if (session->context_slot) {
+                            std::cout << "[VAD:" << session->id << "] Released context " << session->context_slot->slot_id
+                                      << " (utterance too short)" << std::endl;
+                            releaseContext(session->context_slot);
+                            session->context_slot = nullptr;
+                        }
                         std::cout << "[VAD:" << session->id << "] Ignored short utterance (" << speech_duration << "ms)" << std::endl;
                     }
                 }
@@ -488,7 +551,13 @@ void WhisperServer::emitFinal(std::shared_ptr<Session> session) {
     std::string final_text;
 
     // Use accumulated audio from pcmf32_old (runInference clears audio buffer)
+    // For catch-up inference (WAITING_FOR_CONTEXT → ENDING), pcmf32_old may be empty
+    // and audio is still in the buffer
     std::vector<float> pcmf32 = session->pcmf32_old;
+    if (pcmf32.empty()) {
+        // Catch-up case: audio never went through inference, still in buffer
+        pcmf32 = session->audio->getAll();
+    }
     float duration_ms = (pcmf32.size() * 1000.0f) / WHISPER_SAMPLE_RATE;
 
     std::cout << "[VAD:" << session->id << "] Running final inference..." << std::endl;
@@ -538,6 +607,13 @@ void WhisperServer::emitFinal(std::shared_ptr<Session> session) {
     session->pcmf32_old.clear();
     session->last_text.clear();
     session->audio->clear();
+
+    // Release context back to pool for other sessions
+    if (session->context_slot) {
+        std::cout << "[VAD:" << session->id << "] Released context " << session->context_slot->slot_id << std::endl;
+        releaseContext(session->context_slot);
+        session->context_slot = nullptr;
+    }
 }
 
 // === Event Loop Integration ===

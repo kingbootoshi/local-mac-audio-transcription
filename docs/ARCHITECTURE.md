@@ -25,9 +25,9 @@ This document explains the design decisions, threading model, and component inte
 │  │  ┌─────────────────────────────────────────────────────────────────┐ │   │
 │  │  │                    uWebSockets Event Loop                        │ │   │
 │  │  │                                                                  │ │   │
-│  │  │  onOpen()   → createSession() → acquire context from pool       │ │   │
+│  │  │  onOpen()   → createSession() (no context yet)                  │ │   │
 │  │  │  onMessage() → onAudioReceived() → push to AudioBuffer          │ │   │
-│  │  │  onClose()  → destroySession() → release context to pool        │ │   │
+│  │  │  onClose()  → destroySession() → release context if held        │ │   │
 │  │  └─────────────────────────────────────────────────────────────────┘ │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
@@ -70,9 +70,9 @@ The whisper.cpp library maintains internal state in `whisper_context`. You canno
 - Use the same context from multiple threads simultaneously
 - Run inference on one context while another thread reads from it
 
-### Solution: Context Pooling
+### Solution: Context Leasing
 
-We pre-load N independent whisper contexts at startup:
+We pre-load N independent whisper contexts at startup, but lease them on-demand:
 
 ```cpp
 // Each slot has its own whisper_context
@@ -86,12 +86,25 @@ struct ContextSlot {
 std::vector<std::unique_ptr<ContextSlot>> context_pool_;
 ```
 
-When a client connects:
-1. `acquireContext()` finds a free slot and marks it `in_use = true`
-2. The session is bound to that context for its lifetime
-3. On disconnect, `releaseContext()` marks `in_use = false`
+**Context lifecycle (leasing model):**
+1. Client connects → session created with `context_slot = nullptr` (no context yet)
+2. VAD detects speech → `acquireContext()` leases a context for this utterance
+3. Inference runs while user is speaking → partials emitted
+4. VAD detects silence → final emitted → `releaseContext()` returns context to pool
+5. Client can speak again → lease a new context (may be different slot)
 
-**Memory Trade-off**: Each context loads the full model (~388 MB for base.en). With 4 contexts, you need ~1.5 GB RAM. Configure `--contexts` based on your expected concurrent users.
+**WAITING_FOR_CONTEXT state:** If all contexts are busy when speech starts:
+- Session enters `WAITING_FOR_CONTEXT` state
+- Audio continues buffering (up to 30 seconds)
+- When a context becomes available, session transitions to `SPEAKING`
+- If user stops speaking before getting a context, catch-up inference runs when context is available
+
+**Benefits:**
+- Unlimited idle connections (only active speakers use contexts)
+- Memory scales with concurrent speakers, not total connections
+- No connection rejection - clients just wait for context availability
+
+**Memory Trade-off**: Each context loads the full model (~388 MB for base.en). With 4 contexts, you need ~1.5 GB RAM. Configure `--contexts` based on your expected **concurrent speakers** (not total connections).
 
 ## Threading Model
 
@@ -263,12 +276,13 @@ whisper_free(ctx);  // Called in destructor
 Client                          Server
   │                               │
   │──── Connect (WS) ────────────▶│
-  │                               │ createSession()
-  │                               │ acquireContext()
+  │                               │ createSession() [no context yet]
   │◀─── {"type":"ready"} ─────────│
   │                               │
-  │──── Binary PCM ──────────────▶│
+  │──── Binary PCM (speech) ─────▶│
   │                               │ AudioBuffer.push()
+  │                               │ VAD detects speech
+  │                               │ acquireContext() → lease context
   │──── Binary PCM ──────────────▶│
   │                               │
   │                               │ [Inference thread wakes]
@@ -279,9 +293,19 @@ Client                          Server
   │                               │ [Next inference cycle]
   │◀─── {"type":"partial"} ───────│
   │                               │
+  │──── Binary PCM (silence) ────▶│
+  │                               │ VAD detects silence
+  │                               │ emitFinal()
+  │◀─── {"type":"final"} ─────────│
+  │                               │ releaseContext() → return to pool
+  │                               │
+  │──── Binary PCM (speech) ─────▶│ [User speaks again]
+  │                               │ acquireContext() → may get different slot
+  │                               │ ...
+  │                               │
   │──── Close ───────────────────▶│
   │                               │ destroySession()
-  │                               │ releaseContext()
+  │                               │ releaseContext() if held
   │                               │
 ```
 
@@ -321,8 +345,8 @@ Per session buffer: ~2 MB (30 seconds of audio)
 
 ## Future Improvements
 
-1. **Voice Activity Detection (VAD)**: Detect speech end to emit `final` transcripts
-2. **Thread-per-context**: Run inference in parallel for multiple sessions
-3. **SSL/TLS**: Native TLS support or reverse proxy
-4. **Streaming segments**: Send tokens as they're decoded (requires whisper.cpp callback)
-5. **Language detection**: Auto-detect language for multilingual models
+1. **Thread-per-context**: Run inference in parallel for multiple sessions
+2. **SSL/TLS**: Native TLS support or reverse proxy
+3. **Streaming segments**: Send tokens as they're decoded (requires whisper.cpp callback)
+4. **Language detection**: Auto-detect language for multilingual models
+5. **Priority queuing**: Prefer recently-active sessions when allocating contexts

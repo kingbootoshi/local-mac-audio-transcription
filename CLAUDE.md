@@ -35,7 +35,7 @@ cd examples/web-client && npm install && npm run dev
 - Event loop thread runs `flushSessionMessagesOnEventLoop()` to drain and send messages
 - Messages are delivered immediately (event-driven), not dependent on incoming audio
 
-**Context pooling**: whisper.cpp is NOT thread-safe. The server pre-loads N independent `whisper_context` instances at startup. Each WebSocket connection acquires a context slot; when all slots are busy, new connections are rejected.
+**Context leasing**: whisper.cpp is NOT thread-safe. The server pre-loads N independent `whisper_context` instances at startup. Contexts are leased on-demand when speech is detected (not on connection), and released back to the pool after the final transcript is emitted. This allows unlimited idle connections with limited contexts - only active speakers consume contexts. If all contexts are busy when speech starts, audio is buffered and processed when a context becomes available (catch-up inference).
 
 **Audio pipeline**:
 - Browser: Mic (48kHz) → Resample (16kHz) → Float32 → Int16 → WebSocket binary frames
@@ -98,9 +98,8 @@ cd examples/web-client && npm install && npm run dev
 ## Known Limitations
 
 1. Single inference thread processes sessions sequentially (not in parallel)
-2. Context-per-connection model (idle connections still hold contexts)
-3. No TLS - use reverse proxy for production
-4. No authentication - any client can connect
+2. No TLS - use reverse proxy for production
+3. No authentication - any client can connect
 
 ## Testing
 

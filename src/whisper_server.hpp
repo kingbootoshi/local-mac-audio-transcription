@@ -42,7 +42,7 @@ struct Session;
 class WhisperServer;
 
 // VAD speech state (managed by inference thread)
-enum class SpeechState { IDLE, SPEAKING, ENDING };
+enum class SpeechState { IDLE, WAITING_FOR_CONTEXT, SPEAKING, ENDING };
 
 // Context slot in the pool
 struct ContextSlot {
@@ -65,6 +65,7 @@ struct Session {
     SpeechState speech_state = SpeechState::IDLE;
     int64_t speech_start_ms = 0;        // When speech began
     int64_t last_speech_ms = 0;         // Last VAD-positive timestamp
+    int64_t waiting_start_ms = 0;       // When we started waiting for context
     std::string pending_text;           // Last partial for potential final
 
     // WebSocket handle (event loop thread only)
