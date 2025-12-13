@@ -35,10 +35,10 @@ describe('VAD Boundaries', () => {
     const audioChunks = loadWavAsChunks(JFK_WAV, 100);
     await client.sendChunks(audioChunks, 20);
 
-    // Send 2 seconds of silence (triggers VAD ENDING state)
-    // and keep sending to drain the message queue
+    // Send silence to trigger VAD ENDING state (silence > vad-silence threshold)
+    // Messages now flush immediately via event-driven callback
     const silence = createSilence(100);
-    for (let i = 0; i < 40; i++) {  // 4 seconds of silence chunks
+    for (let i = 0; i < 20; i++) {  // 2 seconds of silence (> 1000ms threshold)
       client.sendAudio(silence);
       await new Promise((r) => setTimeout(r, 100));
     }

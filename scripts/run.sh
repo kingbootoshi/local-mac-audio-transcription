@@ -28,7 +28,7 @@ VAD_MODEL="${VAD_MODEL:-$DEFAULT_VAD_MODEL}"
 VAD_ARGS=""
 if [ -f "$VAD_MODEL" ]; then
     echo "VAD model found: $VAD_MODEL"
-    VAD_ARGS="--vad-model $VAD_MODEL --vad-threshold ${VAD_THRESHOLD:-0.5} --vad-silence ${VAD_SILENCE:-500}"
+    VAD_ARGS="--vad-model $VAD_MODEL --vad-threshold ${VAD_THRESHOLD:-0.5} --vad-silence ${VAD_SILENCE:-1000}"
 else
     echo "VAD model not found at $VAD_MODEL"
     echo "To enable VAD, download with: cd ../whisper.cpp && ./models/download-vad-model.sh silero-v6.2.0"
@@ -39,7 +39,7 @@ echo ""
 echo "Starting whisper-stream-server..."
 echo "Model: $MODEL"
 if [ -n "$VAD_ARGS" ]; then
-    echo "VAD: enabled (threshold=${VAD_THRESHOLD:-0.5}, silence=${VAD_SILENCE:-500}ms)"
+    echo "VAD: enabled (threshold=${VAD_THRESHOLD:-0.5}, silence=${VAD_SILENCE:-1000}ms)"
 else
     echo "VAD: disabled"
 fi

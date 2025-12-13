@@ -67,6 +67,12 @@ struct Session {
     int64_t last_speech_ms = 0;         // Last VAD-positive timestamp
     std::string pending_text;           // Last partial for potential final
 
+    // WebSocket handle (event loop thread only)
+    void* ws_handle = nullptr;
+
+    // Whether a flush has been scheduled (prevents spamming defer)
+    std::atomic<bool> flush_pending{false};
+
     // Thread-safe outgoing message queue
     // Inference thread enqueues messages; uWS event loop thread drains them
     std::mutex outgoing_mutex;
@@ -116,6 +122,11 @@ public:
     // Audio processing
     void onAudioReceived(const std::string& session_id, const int16_t* data, size_t len);
 
+    // Event loop integration for message flushing
+    void setEventLoop(void* loop);
+    void attachWebSocket(const std::string& session_id, void* ws_handle);
+    void detachWebSocket(const std::string& session_id);
+
     // JSON message helpers
     std::string makeReadyMessage();
     std::string makePartialMessage(const std::string& text);
@@ -136,6 +147,9 @@ private:
     whisper_vad_context* vad_ctx_ = nullptr;
     std::mutex vad_mutex_;
 
+    // Event loop for deferred message flushing
+    void* loop_ = nullptr;
+
     // Context pool management
     ContextSlot* acquireContext();
     void releaseContext(ContextSlot* slot);
@@ -148,6 +162,10 @@ private:
     float detectSpeechProb(const float* samples, int n_samples);
     void updateVADState(std::shared_ptr<Session> session, int64_t now_ms);
     void emitFinal(std::shared_ptr<Session> session);
+
+    // Message flush methods
+    void notifySessionHasMessages(const std::string& session_id);
+    void flushSessionMessagesOnEventLoop(const std::string& session_id);
 };
 
 #endif // WHISPER_SERVER_HPP

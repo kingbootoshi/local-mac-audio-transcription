@@ -1,6 +1,8 @@
 #include "whisper_server.hpp"
 #include "json.hpp"
 
+#include <App.h>  // For uWS::Loop and WebSocket types
+
 #include <iostream>
 #include <chrono>
 #include <sstream>
@@ -8,6 +10,11 @@
 #include <random>
 
 using json = nlohmann::json;
+
+// Forward declaration of per-socket data (matches main.cpp)
+struct PerSocketData {
+    std::string session_id;
+};
 
 // Callback to disable whisper internal logging (for VAD spam)
 static void whisper_log_disable(enum ggml_log_level, const char*, void*) {}
@@ -388,9 +395,10 @@ void WhisperServer::runInference(std::shared_ptr<Session> session) {
     }
 
     // Enqueue result if text changed
-    // Messages are sent from the uWS event loop thread via drainSessionMessages()
+    // Messages are flushed via event-driven callback (notifySessionHasMessages)
     if (!text.empty() && text != session->last_text) {
         session->enqueueMessage(makePartialMessage(text));
+        notifySessionHasMessages(session->id);
         session->pending_text = text;  // Save for potential final
         session->last_text = text;
     }
@@ -517,6 +525,7 @@ void WhisperServer::emitFinal(std::shared_ptr<Session> session) {
 
     if (!final_text.empty()) {
         session->enqueueMessage(makeFinalMessage(final_text));
+        notifySessionHasMessages(session->id);
         std::cout << "[VAD:" << session->id << "] === FINAL TRANSCRIPT ===" << std::endl;
         std::cout << "[VAD:" << session->id << "]   \"" << final_text << "\"" << std::endl;
     } else {
@@ -529,6 +538,80 @@ void WhisperServer::emitFinal(std::shared_ptr<Session> session) {
     session->pcmf32_old.clear();
     session->last_text.clear();
     session->audio->clear();
+}
+
+// === Event Loop Integration ===
+
+void WhisperServer::setEventLoop(void* loop) {
+    loop_ = loop;
+}
+
+void WhisperServer::attachWebSocket(const std::string& session_id, void* ws_handle) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto it = sessions_.find(session_id);
+    if (it != sessions_.end()) {
+        it->second->ws_handle = ws_handle;
+    }
+}
+
+void WhisperServer::detachWebSocket(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto it = sessions_.find(session_id);
+    if (it != sessions_.end()) {
+        it->second->ws_handle = nullptr;
+        it->second->flush_pending.store(false);
+    }
+}
+
+void WhisperServer::notifySessionHasMessages(const std::string& session_id) {
+    if (!loop_) return;
+
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        auto it = sessions_.find(session_id);
+        if (it == sessions_.end() || !it->second->active) return;
+        session = it->second;
+    }
+
+    // If a flush is already pending, don't schedule another
+    if (session->flush_pending.exchange(true)) {
+        return;
+    }
+
+    // Schedule flush on the event loop thread
+    auto* uws_loop = static_cast<uWS::Loop*>(loop_);
+    uws_loop->defer([this, session_id]() {
+        this->flushSessionMessagesOnEventLoop(session_id);
+    });
+}
+
+void WhisperServer::flushSessionMessagesOnEventLoop(const std::string& session_id) {
+    std::shared_ptr<Session> session;
+
+    {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        auto it = sessions_.find(session_id);
+        if (it == sessions_.end()) return;
+        session = it->second;
+    }
+
+    // Reset flush_pending for future messages
+    session->flush_pending.store(false);
+
+    // If socket is gone, discard messages
+    if (!session->ws_handle) {
+        session->drainMessages();
+        return;
+    }
+
+    // Cast and send
+    auto* ws = static_cast<uWS::WebSocket<false, true, PerSocketData>*>(session->ws_handle);
+
+    std::deque<std::string> pending = session->drainMessages();
+    for (const auto& msg : pending) {
+        ws->send(msg, uWS::OpCode::TEXT);
+    }
 }
 
 // === JSON Message Helpers ===

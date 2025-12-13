@@ -176,6 +176,9 @@ int main(int argc, char** argv) {
                     return;
                 }
 
+                // Attach WebSocket handle for event-driven message flushing
+                server.attachWebSocket(session_id, static_cast<void*>(ws));
+
                 // Send ready message (safe: we're on the uWS event loop thread)
                 ws->send(server.makeReadyMessage(), uWS::OpCode::TEXT);
             },
@@ -195,13 +198,7 @@ int main(int argc, char** argv) {
                     // For now, we don't handle any text commands
                     std::cout << "[whisper-server] Received text message: " << message << std::endl;
                 }
-
-                // Drain any pending messages from the inference thread
-                // This is safe because we're on the uWS event loop thread
-                auto pending = server.drainSessionMessages(data->session_id);
-                for (const auto& msg : pending) {
-                    ws->send(msg, uWS::OpCode::TEXT);
-                }
+                // Messages are now flushed via event-driven callback (notifySessionHasMessages)
             },
 
             .close = [&server](auto* ws, int code, std::string_view message) {
@@ -209,13 +206,16 @@ int main(int argc, char** argv) {
                 std::cout << "[whisper-server] WebSocket disconnected: " << data->session_id
                           << " (code=" << code << ")" << std::endl;
 
+                // Detach WebSocket before destroying session
+                server.detachWebSocket(data->session_id);
                 server.destroySession(data->session_id);
             }
         })
-        .listen(config.port, [&config](auto* listen_socket) {
+        .listen(config.port, [&config, &server](auto* listen_socket) {
             if (listen_socket) {
                 g_listen_socket = listen_socket;
                 g_loop = uWS::Loop::get();
+                server.setEventLoop(static_cast<void*>(g_loop));
                 std::cout << "[whisper-server] Listening on port " << config.port << std::endl;
             } else {
                 std::cerr << "[whisper-server] Failed to listen on port " << config.port << std::endl;

@@ -31,7 +31,9 @@ cd examples/web-client && npm install && npm run dev
 
 **Thread-safe message passing**: The inference thread never calls `ws->send()` directly (uWebSockets is not thread-safe). Instead:
 - Inference thread enqueues messages to `Session::outgoing_messages` (mutex-protected)
-- uWS event loop drains the queue via `drainSessionMessages()` on each audio chunk received
+- Inference thread calls `notifySessionHasMessages()` which schedules a flush via `uWS::Loop::defer()`
+- Event loop thread runs `flushSessionMessagesOnEventLoop()` to drain and send messages
+- Messages are delivered immediately (event-driven), not dependent on incoming audio
 
 **Context pooling**: whisper.cpp is NOT thread-safe. The server pre-loads N independent `whisper_context` instances at startup. Each WebSocket connection acquires a context slot; when all slots are busy, new connections are rejected.
 
@@ -63,7 +65,7 @@ cd examples/web-client && npm install && npm run dev
 { "type": "error", "message": "..." }
 ```
 
-Note: Currently only emits `partial` messages. VAD for `final` detection is not implemented.
+**VAD behavior**: When VAD is enabled (`--vad-model`), the server emits `final` after silence exceeds `--vad-silence` (default 1000ms). Without VAD, only `partial` messages are emitted.
 
 ## Dependencies
 
@@ -83,6 +85,9 @@ Note: Currently only emits `partial` messages. VAD for `final` detection is not 
 | `--length` | `5000` | Audio context window (ms) |
 | `--keep` | `200` | Overlap between windows (ms) |
 | `--no-gpu` | - | Disable Metal GPU |
+| `--vad-model` | - | Path to VAD model (enables VAD) |
+| `--vad-threshold` | `0.5` | Speech probability threshold (0.0-1.0) |
+| `--vad-silence` | `1000` | Silence duration to trigger final (ms) |
 
 ## Memory Usage
 
@@ -92,7 +97,22 @@ Note: Currently only emits `partial` messages. VAD for `final` detection is not 
 
 ## Known Limitations
 
-1. No Voice Activity Detection (VAD) - server only emits `partial`, never `final`
-2. Single inference thread processes sessions sequentially (not in parallel)
+1. Single inference thread processes sessions sequentially (not in parallel)
+2. Context-per-connection model (idle connections still hold contexts)
 3. No TLS - use reverse proxy for production
 4. No authentication - any client can connect
+
+## Testing
+
+```bash
+# Run all tests
+./scripts/run_tests.sh
+
+# Run only unit tests (no model required)
+./scripts/run_tests.sh unit
+
+# Run only E2E tests (requires running server)
+./scripts/run_tests.sh e2e
+```
+
+See `docs/TESTING.md` for full test documentation.

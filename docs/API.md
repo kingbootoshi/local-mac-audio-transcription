@@ -79,7 +79,7 @@ Sent during speech with the current transcription. Updates frequently as more au
 
 #### Final Message
 
-Sent when speech is complete and the transcription is finalized.
+Sent when VAD detects speech has ended (silence threshold exceeded). Contains the complete transcription for the utterance.
 
 ```json
 {
@@ -93,7 +93,12 @@ Sent when speech is complete and the transcription is finalized.
 | `type` | string | Always `"final"` |
 | `text` | string | Finalized transcription |
 
-**Note**: Currently, the server only sends `partial` messages. VAD (Voice Activity Detection) for detecting speech end is not yet implemented.
+**VAD Behavior**: When VAD is enabled, the server tracks speech state:
+- `IDLE` → `SPEAKING`: Speech detected above threshold
+- `SPEAKING` → `ENDING`: Silence exceeds `--vad-silence` duration (default: 1000ms)
+- `ENDING` → emits `final` message and returns to `IDLE`
+
+Finals are only emitted when VAD is enabled (`--vad-model` specified).
 
 #### Error Message
 
@@ -339,7 +344,12 @@ The server does not implement rate limiting. For production:
 
 ## Protocol Versioning
 
-The current protocol is version 1 (implicit). Future versions may add:
+The current protocol is version 1 (implicit). Current features:
+- Real-time partial transcriptions
+- VAD-gated final transcriptions (when VAD model loaded)
+- Event-driven message delivery (messages flush immediately, not dependent on incoming audio)
+
+Future versions may add:
 
 ```json
 {

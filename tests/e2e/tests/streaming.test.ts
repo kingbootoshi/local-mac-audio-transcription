@@ -27,16 +27,11 @@ describe('Streaming', () => {
   it('receives partials when streaming JFK audio', async () => {
     const chunks = loadWavAsChunks(JFK_WAV, 100);  // 100ms chunks
 
-    // Stream with small delay to allow message draining
-    // (server drains messages only when audio is received)
+    // Stream audio - messages now flush immediately via event-driven callback
     await client.sendChunks(chunks, 10);
 
-    // Send a few more silence chunks to drain remaining messages
-    const silence = createSilence(100);
-    for (let i = 0; i < 20; i++) {
-      client.sendAudio(silence);
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    // Wait for inference to complete (runs every 500ms)
+    await new Promise((r) => setTimeout(r, 1000));
 
     const partials = client.getPartials();
     expect(partials.length).toBeGreaterThan(0);
@@ -45,15 +40,10 @@ describe('Streaming', () => {
   it('partial contains expected keywords', async () => {
     const chunks = loadWavAsChunks(JFK_WAV, 100);
 
-    // Stream with delay to allow draining
     await client.sendChunks(chunks, 10);
 
-    // Drain remaining messages
-    const silence = createSilence(100);
-    for (let i = 0; i < 20; i++) {
-      client.sendAudio(silence);
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    // Wait for inference to complete
+    await new Promise((r) => setTimeout(r, 1000));
 
     const partials = client.getPartials();
     const allText = partials.join(' ').toLowerCase();
@@ -73,12 +63,8 @@ describe('Streaming', () => {
 
     await client.sendChunks(chunks, 5);
 
-    // Drain messages
-    const silence = createSilence(100);
-    for (let i = 0; i < 10; i++) {
-      client.sendAudio(silence);
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    // Wait for inference
+    await new Promise((r) => setTimeout(r, 1000));
 
     const partials = client.getPartials();
     expect(partials.length).toBeGreaterThan(0);
@@ -89,12 +75,8 @@ describe('Streaming', () => {
 
     await client.sendChunks(chunks, 20);
 
-    // Drain messages
-    const silence = createSilence(100);
-    for (let i = 0; i < 10; i++) {
-      client.sendAudio(silence);
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    // Wait for inference
+    await new Promise((r) => setTimeout(r, 1000));
 
     const partials = client.getPartials();
     expect(partials.length).toBeGreaterThan(0);
@@ -110,8 +92,7 @@ describe('Streaming', () => {
     expect(client.isConnected()).toBe(true);
 
     // Note: Partials may or may not be received immediately since
-    // message draining happens on audio receive and rapid streaming
-    // doesn't give the inference thread time to process.
+    // rapid streaming doesn't give the inference thread time to process.
     // This test verifies the server doesn't crash under load.
   });
 
